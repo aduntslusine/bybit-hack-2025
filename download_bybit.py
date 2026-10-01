@@ -27,6 +27,7 @@ STOP_AT = 10000
 NODES = Path("data/nodes.csv")
 EDGES = Path("data/edges.csv")
 EXPANDED = Path("data/expanded.txt")
+LOG = Path("data/download.log")
 API = "https://api.routescan.io/v2/network/mainnet/evm/1/etherscan/api"
 WINDOW_START = datetime(2025, 2, 21, tzinfo=timezone.utc)
 WINDOW_END = datetime(2025, 3, 7, 23, 59, 59, tzinfo=timezone.utc)
@@ -47,6 +48,14 @@ EDGE_FIELDS = [
     "signer",
     "transfer_index",
 ]
+
+def log(message):
+    line = time.strftime("%H:%M:%S") + "  " + message
+    print(line, flush=True)
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    with LOG.open("a") as handle:
+        handle.write(line + "\n")
+
 
 parser = argparse.ArgumentParser(description="Download the theft wallet graph")
 parser.add_argument(
@@ -376,7 +385,7 @@ def load_edges():
         return
     rows = list(csv.DictReader(EDGES.open()))
     if not rows or "token_contract" not in rows[0] or "signer" not in rows[0]:
-        print("leaving the previous one-hop files behind", flush=True)
+        log("old edges file has no token or signer column, starting fresh")
         return
     for row in rows:
         remember(row)
@@ -403,7 +412,7 @@ def ensure_nodes(addrs):
     pending = [addr for addr in addrs if addr not in saved]
     if not pending:
         return
-    print(f"looking up {len(pending)} wallets", flush=True)
+    log(f"fetching details for {len(pending)} wallets")
     done = 0
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = {pool.submit(address_info, addr): addr for addr in pending}
@@ -414,11 +423,11 @@ def ensure_nodes(addrs):
                 info = future.result()
                 saved[info["id"]] = info
             except Exception as err:
-                print(f"failed {addr}: {err}", flush=True)
+                log(f"could not fetch {addr}: {err}")
                 continue
             if done % 25 == 0 or done == len(pending):
                 write_nodes()
-                print(f"looked up {done} of {len(pending)} wallets", flush=True)
+                log(f"fetched {done} of {len(pending)} wallets")
     write_nodes()
 
 
@@ -426,7 +435,7 @@ def expand_many(addrs):
     need = [addr for addr in addrs if addr not in expanded and addr in received]
     if not need:
         return
-    print(f"expanding {len(need)} wallets", flush=True)
+    log(f"following transfers out of {len(need)} wallets")
     done = 0
     finished = []
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -437,7 +446,7 @@ def expand_many(addrs):
             try:
                 items = future.result()
             except Exception as err:
-                print(f"failed {addr}: {err}", flush=True)
+                log(f"could not follow {addr}: {err}")
             else:
                 for item in items:
                     remember(item)
@@ -447,7 +456,7 @@ def expand_many(addrs):
                 for done_addr in finished:
                     mark_expanded(done_addr)
                 finished.clear()
-                print(f"expanded {done} of {len(need)} wallets", flush=True)
+                log(f"followed {done} of {len(need)} wallets")
 
 
 def note_targets(addr):
@@ -524,9 +533,8 @@ for hop in range(1, MAX_HOPS + 1):
         nxt.append(addr)
     write_nodes()
     write_edges()
-    print(
-        f"hop {hop}: {len(new_addrs)} new addresses, {len(edges) - edges_before} new transfers, {stopped} not expanded",
-        flush=True,
+    log(
+        f"hop {hop}: {len(new_addrs)} new wallets, {len(edges) - edges_before} new transfers, {stopped} not followed (over {STOP_AT} transactions)"
     )
     if hop == MAX_HOPS or not nxt:
         break
@@ -534,5 +542,5 @@ for hop in range(1, MAX_HOPS + 1):
 
 write_nodes()
 write_edges()
-print(f"saved {len(saved)} wallets to {NODES}", flush=True)
-print(f"saved {len(edges)} transfers to {EDGES}", flush=True)
+log(f"saved {len(saved)} wallets to {NODES}")
+log(f"saved {len(edges)} transfers to {EDGES}")
