@@ -10,6 +10,7 @@ when its transaction count is over 10,000; the transfer into it is kept.
 import argparse
 import csv
 import json
+import os
 import threading
 import time
 import urllib.error
@@ -29,6 +30,22 @@ EDGES = Path("data/edges.csv")
 EXPANDED = Path("data/expanded.txt")
 LOG = Path("data/download.log")
 API = "https://api.routescan.io/v2/network/mainnet/evm/1/etherscan/api"
+
+
+def load_dotenv():
+    path = Path(".env")
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        os.environ.setdefault(name.strip(), value.strip().strip("'\""))
+
+
+load_dotenv()
+API_KEY = os.environ.get("ROUTESCAN_API_KEY", "").strip()
 WINDOW_START = datetime(2025, 2, 21, tzinfo=timezone.utc)
 WINDOW_END = datetime(2025, 3, 7, 23, 59, 59, tzinfo=timezone.utc)
 THEFT = datetime(2025, 2, 21, 14, 13, 35, tzinfo=timezone.utc)
@@ -63,6 +80,11 @@ parser.add_argument(
     action="store_true",
     help="also save the explorer scam flag (is_scam) on each wallet",
 )
+parser.add_argument(
+    "--timestamps",
+    action="store_true",
+    help="also save the earliest transfer time for each wallet",
+)
 args = parser.parse_args()
 
 
@@ -80,9 +102,17 @@ def rate_limited(payload):
 
 
 def call_json(url, timeout=60):
+    if API_KEY and url.startswith(API) and "apikey=" not in url.lower():
+        url += "&" + urllib.parse.urlencode({"apikey": API_KEY})
     for attempt in range(8):
         try:
-            request = urllib.request.Request(url, headers={"accept": "application/json"})
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "accept": "application/json",
+                    "user-agent": "Mozilla/5.0",
+                },
+            )
             with urllib.request.urlopen(request, timeout=timeout) as resp:
                 payload = json.load(resp)
         except urllib.error.HTTPError as err:
@@ -286,15 +316,15 @@ def tag_names(tags):
 
 
 def address_info(addr):
-    # One pass: earliest on-chain transfer, then the explorer record for this address.
-    stamps = []
-    for action in ("txlist", "txlistinternal", "tokentx"):
-        row = first_row(action, addr)
-        if row and row.get("timeStamp"):
-            stamps.append(int(row["timeStamp"]))
     when = ""
-    if stamps:
-        when = datetime.fromtimestamp(min(stamps), timezone.utc).isoformat()
+    if args.timestamps:
+        stamps = []
+        for action in ("txlist", "txlistinternal", "tokentx"):
+            row = first_row(action, addr)
+            if row and row.get("timeStamp"):
+                stamps.append(int(row["timeStamp"]))
+        if stamps:
+            when = datetime.fromtimestamp(min(stamps), timezone.utc).isoformat()
     data = call_json("https://eth.blockscout.com/api/v2/addresses/" + addr)
     counters = call_json("https://eth.blockscout.com/api/v2/addresses/" + addr + "/counters")
     if "transactions_count" not in counters:
@@ -369,7 +399,9 @@ def mark_expanded(addr):
 
 
 def row_complete(row):
-    if not row.get("earliest_tx_time") or row.get("is_contract") == "":
+    if args.timestamps and not row.get("earliest_tx_time"):
+        return False
+    if row.get("is_contract") == "":
         return False
     if "public_tags" not in row or "transactions_count" not in row:
         return False
@@ -414,7 +446,7 @@ def ensure_nodes(addrs):
         return
     log(f"fetching details for {len(pending)} wallets")
     done = 0
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
         futures = {pool.submit(address_info, addr): addr for addr in pending}
         for future in as_completed(futures):
             addr = futures[future]
@@ -438,7 +470,7 @@ def expand_many(addrs):
     log(f"following transfers out of {len(need)} wallets")
     done = 0
     finished = []
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
         futures = {pool.submit(outgoing, addr, received[addr]): addr for addr in need}
         for future in as_completed(futures):
             addr = futures[future]
@@ -495,6 +527,10 @@ fields = [
 if args.is_spam:
     fields.append("is_scam")
 
+if API_KEY:
+    log("using a Routescan API key")
+else:
+    log("no Routescan API key set")
 start_block = block_by_time(WINDOW_START, "after")
 end_block = block_by_time(WINDOW_END, "before")
 load_edges()
