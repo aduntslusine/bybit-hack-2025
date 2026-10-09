@@ -1,10 +1,10 @@
-"""Download the theft graph from BigQuery into bigquery/out/.
+"""Download the theft graph from BigQuery into out/.
 
-Does not read or write data/. One scan of 21 Feb–7 Mar 2025, then a local
-walk from the cold wallet. Stops before a query would pass the free-tier cap.
+One scan of 21 Feb–7 Mar 2025, then a local walk from the cold wallet.
+Stops before a query would pass the free-tier cap.
 
-  python3 bigquery/download_graph.py --project YOUR_PROJECT_ID
-  python3 bigquery/download_graph.py --noise
+  python3 download_graph.py --project YOUR_PROJECT_ID
+  python3 download_graph.py --noise
 """
 
 import argparse
@@ -16,8 +16,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-OUT = ROOT / "bigquery" / "out"
+ROOT = Path(__file__).resolve().parent
+OUT = ROOT / "out"
 DATASET = "bigquery-public-data.goog_blockchain_ethereum_mainnet_us"
 TOKEN_TABLE = "bigquery-public-data.crypto_ethereum.tokens"
 
@@ -61,10 +61,6 @@ def log(message):
             handle.write(line + "\n")
 
 
-def gib(n):
-    return f"{n / 1024**3:.2f} GiB"
-
-
 def norm_time(value):
     if not isinstance(value, datetime):
         text = str(value).strip().replace(" ", "T").replace("Z", "+00:00")
@@ -76,37 +72,12 @@ def norm_time(value):
     return value.astimezone(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def human(value, decimals):
-    amount = int(Decimal(str(value)))
-    scale = 10 ** int(decimals)
-    whole, frac = divmod(amount, scale)
-    if frac == 0:
-        return str(whole)
-    text = f"{whole}.{frac:0{int(decimals)}d}".rstrip("0").rstrip(".")
-    return text
-
-
 def cell(value):
     if value is None:
         return ""
     if isinstance(value, datetime):
         return norm_time(value)
     return str(value)
-
-
-def project_id(arg):
-    import os
-
-    if arg:
-        return arg.strip()
-    if os.environ.get("BIGQUERY_PROJECT"):
-        return os.environ["BIGQUERY_PROJECT"].strip()
-    env = ROOT / ".env"
-    if env.exists():
-        for line in env.read_text().splitlines():
-            if line.startswith("BIGQUERY_PROJECT="):
-                return line.split("=", 1)[1].strip().strip('"').strip("'")
-    return ""
 
 
 def queries():
@@ -171,26 +142,22 @@ def save_state(state):
     (OUT / "state.json").write_text(json.dumps(state) + "\n")
 
 
-def dry_run(client, sql):
-    from google.cloud import bigquery
-
-    job = client.query(sql, location="US", job_config=bigquery.QueryJobConfig(dry_run=True, use_query_cache=False))
-    return int(job.total_bytes_processed or 0)
-
-
 def download_table(client, name, sql, budget, state):
     dest = OUT / "raw" / f"{name}.csv"
     if dest.exists() and dest.stat().st_size > 0:
         log(f"{name} already saved")
         return
-    estimate = dry_run(client, sql)
-    left = budget - state["spent"]
-    log(f"{name} would scan {gib(estimate)}; {gib(max(left, 0))} left in the cap")
-    if estimate > left:
-        log("stopped before running it, so this added nothing to the bill")
-        raise SystemExit(2)
     from google.cloud import bigquery
 
+    estimate = int(client.query(
+        sql, location="US",
+        job_config=bigquery.QueryJobConfig(dry_run=True, use_query_cache=False),
+    ).total_bytes_processed or 0)
+    left = budget - state["spent"]
+    log(f"{name} {estimate // 1024**3} GiB")
+    if estimate > left:
+        log("over the cap")
+        raise SystemExit(2)
     job = client.query(sql, location="US", job_config=bigquery.QueryJobConfig(maximum_bytes_billed=int(left)))
     dest.parent.mkdir(parents=True, exist_ok=True)
     partial = dest.with_suffix(".csv.partial")
@@ -204,11 +171,11 @@ def download_table(client, name, sql, budget, state):
             writer.writerow({key: cell(row[key]) for key in writer.fieldnames})
             count += 1
             if count % 250000 == 0:
-                log(f"  {name}: {count} rows")
+                log(f"{name} {count}")
     partial.replace(dest)
     state["spent"] += int(job.total_bytes_billed or 0)
     save_state(state)
-    log(f"{name}: {count} rows, {gib(state['spent'])} spent so far")
+    log(f"{name} {count} rows")
 
 
 def connect(path):
@@ -237,98 +204,6 @@ def connect(path):
         """
     )
     return con
-
-
-def wei(value):
-    if value in (None, "", "0", "0.0"):
-        return ""
-    return str(int(Decimal(value)))
-
-
-def load(con):
-    con.execute("PRAGMA synchronous=OFF")
-    con.execute("DELETE FROM tx")
-    con.execute("DELETE FROM xfer")
-    parents, eth = [], []
-    with (OUT / "raw" / "transactions.csv").open(newline="") as handle:
-        for row in csv.DictReader(handle):
-            digest = (row.get("hash") or "").lower()
-            signer = (row.get("signer") or "").lower()
-            if not digest or not signer:
-                continue
-            parents.append((digest, signer, row.get("nonce") or "", row.get("gas_used") or "", row.get("gas_price") or "", (row.get("method") or "").lower()))
-            amount = wei(row.get("value"))
-            target = (row.get("to_address") or "").lower()
-            if target and amount:
-                eth.append((signer, target, digest, amount, norm_time(row["block_timestamp"]), row.get("block_number") or "", "", ""))
-            if len(parents) >= 5000:
-                con.executemany("INSERT OR REPLACE INTO tx VALUES (?,?,?,?,?,?)", parents)
-                con.executemany("INSERT INTO xfer VALUES (?,?,?,?,?,?,?,?)", eth)
-                parents, eth = [], []
-    con.executemany("INSERT OR REPLACE INTO tx VALUES (?,?,?,?,?,?)", parents)
-    con.executemany("INSERT INTO xfer VALUES (?,?,?,?,?,?,?,?)", eth)
-    con.commit()
-    log("loaded transactions")
-
-    con.execute("CREATE TEMP TABLE stage (source TEXT, target TEXT, hash TEXT, value TEXT, time TEXT, block_number TEXT, token_contract TEXT, transfer_index TEXT)")
-    for name in ("traces", "token_transfers"):
-        batch = []
-        with (OUT / "raw" / f"{name}.csv").open(newline="") as handle:
-            for row in csv.DictReader(handle):
-                source = (row.get("source") or "").lower()
-                target = (row.get("target") or "").lower()
-                digest = (row.get("hash") or "").lower()
-                amount = wei(row.get("value"))
-                if not source or not target or not digest or not amount:
-                    continue
-                batch.append((source, target, digest, amount, norm_time(row["block_timestamp"]), row.get("block_number") or "", (row.get("token_contract") or "").lower(), row.get("transfer_index") or ""))
-                if len(batch) >= 5000:
-                    flush(con, batch)
-                    batch = []
-        flush(con, batch)
-        con.commit()
-        log(f"loaded {name}")
-    con.execute("CREATE INDEX IF NOT EXISTS xfer_source ON xfer(source, time)")
-    con.commit()
-
-
-def flush(con, batch):
-    if not batch:
-        return
-    con.executemany("INSERT INTO stage VALUES (?,?,?,?,?,?,?,?)", batch)
-    con.execute(
-        """
-        INSERT INTO xfer
-        SELECT source, target, hash, value, time, block_number, token_contract, transfer_index
-        FROM stage WHERE hash IN (SELECT hash FROM tx)
-        """
-    )
-    con.execute("DELETE FROM stage")
-
-
-def mark_busy(con, limit):
-    con.execute("DELETE FROM busy")
-    con.execute(
-        """
-        INSERT INTO busy (address, n)
-        SELECT source, COUNT(*) FROM xfer
-        GROUP BY source
-        HAVING COUNT(*) > ?
-        """,
-        (limit,),
-    )
-    con.commit()
-
-
-def log_stopped(con, addresses):
-    stopped = False
-    for address in addresses:
-        row = con.execute("SELECT n FROM busy WHERE address = ?", (address,)).fetchone()
-        if not row:
-            continue
-        log(f"not expanded {address}: {row['n']} transfers")
-        stopped = True
-    return stopped
 
 
 def expand(con, hop, limit=None):
@@ -387,11 +262,11 @@ def walk(con, hops, start=None, edge_limit=None):
             received = con.execute("SELECT MIN(time) FROM edge WHERE target = ?", (SEED,)).fetchone()[0]
             con.execute("UPDATE reached SET first_time = ? WHERE address = ?", (received or WINDOW, SEED))
             con.execute("DELETE FROM frontier")
-            if not log_stopped(con, [SEED]):
+            if con.execute("SELECT 1 FROM busy WHERE address = ?", (SEED,)).fetchone() is None:
                 con.execute("INSERT INTO frontier VALUES (?, ?)", (SEED, received or WINDOW))
                 expand(con, hop)
         elif start is not None and hop == 1:
-            if not log_stopped(con, [start[0]]):
+            if con.execute("SELECT 1 FROM busy WHERE address = ?", (start[0],)).fetchone() is None:
                 con.execute("INSERT INTO frontier VALUES (?, ?)", start)
                 expand(con, hop, left)
         else:
@@ -406,19 +281,6 @@ def walk(con, hops, start=None, edge_limit=None):
                 """,
                 (hop - 1,),
             )
-            if start is None:
-                log_stopped(con, [
-                    row[0]
-                    for row in con.execute(
-                        """
-                        SELECT r.address FROM reached r
-                        WHERE r.hop = ?
-                          AND r.address NOT IN (SELECT address FROM expanded)
-                          AND r.address IN (SELECT address FROM busy)
-                        """,
-                        (hop - 1,),
-                    )
-                ])
             if con.execute("SELECT COUNT(*) FROM frontier").fetchone()[0] == 0:
                 break
             expand(con, hop, left)
@@ -444,11 +306,6 @@ def noise(con, hops, ratio):
     current = con.execute("SELECT COUNT(*) FROM edge").fetchone()[0]
     row = con.execute("SELECT base, tx FROM noise_meta").fetchone()
     grader = OUT / "grader_noise.csv"
-    db_mtime = (OUT / "graph.sqlite").stat().st_mtime
-    files_current = grader.exists() and all(
-        (OUT / name).exists() and (OUT / name).stat().st_mtime >= db_mtime
-        for name in ("edges.csv", "nodes.csv")
-    )
     if row is None:
         con.execute("INSERT INTO noise_meta VALUES (?, NULL)", (current,))
         con.execute("INSERT INTO noise_before SELECT address FROM reached")
@@ -456,9 +313,9 @@ def noise(con, hops, ratio):
         base = current
     else:
         base = row[0]
-        if current - base >= base * ratio and files_current:
+        if current - base >= base * ratio:
             log(f"noise already has {current - base} transfers")
-            return False
+            return True
         if row[1]:
             con.execute(
                 """
@@ -478,7 +335,6 @@ def noise(con, hops, ratio):
         log("indexing edges")
         con.execute("CREATE UNIQUE INDEX IF NOT EXISTS edge_key ON edge(tx, source, target, token_contract, transfer_index)")
         listed = ",".join("'" + asset + "'" for asset in NOISE_ASSETS)
-        log("choosing noise seeds")
         con.execute("DROP TABLE IF EXISTS big")
         con.execute("DROP TABLE IF EXISTS want")
         con.execute("DROP TABLE IF EXISTS seen")
@@ -491,14 +347,8 @@ def noise(con, hops, ratio):
               AND (length(value) > {len(NOISE_MIN)} OR (length(value) = {len(NOISE_MIN)} AND value >= '{NOISE_MIN}'))
             """
         )
-        n0 = con.execute("SELECT COUNT(*) FROM big").fetchone()[0]
-        log(f"candidates {n0}")
         con.execute("DELETE FROM big WHERE target IN (SELECT address FROM reached)")
-        n1 = con.execute("SELECT COUNT(*) FROM big").fetchone()[0]
-        log(f"after target not in reached: {n1}")
         con.execute("DELETE FROM big WHERE source IN (SELECT address FROM expanded)")
-        n2 = con.execute("SELECT COUNT(*) FROM big").fetchone()[0]
-        log(f"after source not in expanded: {n2}")
         con.execute("CREATE TEMP TABLE want (address TEXT PRIMARY KEY)")
         con.execute("INSERT INTO want SELECT DISTINCT target FROM big")
         con.execute(
@@ -528,7 +378,7 @@ def noise(con, hops, ratio):
         rng.shuffle(fresh)
         rng.shuffle(rest)
         seeds = fresh + rest
-        log(f"{len(fresh)} fresh targets first, then {len(rest)} others; stop around {int(goal)} new edges")
+        log(f"{len(seeds)} noise seeds")
         for tx, target, when in seeds:
             if added >= goal:
                 break
@@ -584,9 +434,9 @@ def run_lookup(client, sql, addresses, budget, state, limit=None):
         job_config=bigquery.QueryJobConfig(dry_run=True, use_query_cache=False, query_parameters=params),
     ).total_bytes_processed or 0)
     left = budget - state["spent"]
-    log(f"lookup would scan {gib(estimate)} for {len(addresses)} addresses")
+    log(f"lookup {len(addresses)} addresses, {estimate // 1024**3} GiB")
     if estimate > left or (limit is not None and estimate > limit):
-        log("skipped to stay inside the cap")
+        log("lookup skipped")
         return None
     job = client.query(
         sql, location="US",
@@ -703,14 +553,16 @@ def earlier(client, con, budget, state):
             ) AS t
             GROUP BY t.address
         """
-        estimate = dry_run(client, sql)
+        estimate = int(client.query(
+            sql, location="US",
+            job_config=bigquery.QueryJobConfig(dry_run=True, use_query_cache=False),
+        ).total_bytes_processed or 0)
         left = budget - state["spent"]
-        log(f"earlier activity would scan {gib(estimate)}; {gib(max(left, 0))} left in the cap")
+        log(f"earlier activity {estimate // 1024**3} GiB")
         if estimate > left:
-            log("stopped before running it, so this added nothing to the bill")
+            log("over the cap")
             raise SystemExit(2)
         job = client.query(sql, location="US", job_config=bigquery.QueryJobConfig(maximum_bytes_billed=int(left)))
-        log(f"earlier activity job {job.job_id}")
         partial = dest.with_suffix(".csv.partial")
         count = 0
         with partial.open("w", newline="") as handle:
@@ -720,11 +572,11 @@ def earlier(client, con, budget, state):
                 writer.writerow([row["address"], row["n"], cell(row["last_seen"])])
                 count += 1
                 if count % 250000 == 0:
-                    log(f"  earlier activity: {count} rows")
+                    log(f"earlier activity {count}")
         partial.replace(dest)
         state["spent"] += int(job.total_bytes_billed or 0)
         save_state(state)
-        log(f"earlier activity: {count} rows, {gib(state['spent'])} spent so far")
+        log(f"earlier activity {count} rows")
     batch = []
     con.execute("PRAGMA busy_timeout=21600000")
     con.execute("DELETE FROM prior")
@@ -757,12 +609,19 @@ def export(con):
             """
         ):
             token = row["token_contract"] or ""
+            places = decimals[token] if token in decimals else (None if token else 18)
+            if places is None:
+                amount = row["value"]
+            else:
+                raw = int(Decimal(str(row["value"])))
+                whole, frac = divmod(raw, 10 ** int(places))
+                amount = str(whole) if frac == 0 else f"{whole}.{frac:0{int(places)}d}".rstrip("0").rstrip(".")
             writer.writerow({
                 "source": row["source"],
                 "target": row["target"],
                 "tx": row["tx"],
                 "asset": symbols.get(token, "TOKEN") if token else "ETH",
-                "amount": human(row["value"], decimals[token]) if token in decimals else (row["value"] if token else human(row["value"], 18)),
+                "amount": amount,
                 "time": row["time"],
                 "block_number": row["block_number"],
                 "nonce": row["nonce"] or "",
@@ -827,136 +686,126 @@ def build(hops, rebuild, max_transfers):
     if db.exists():
         db.unlink()
     con = connect(db)
-    log("loading the window into a local database")
-    load(con)
-    mark_busy(con, max_transfers)
-    log("walking outward from the cold wallet")
+    log("loading")
+    con.execute("PRAGMA synchronous=OFF")
+    con.execute("DELETE FROM tx")
+    con.execute("DELETE FROM xfer")
+    parents, eth = [], []
+    with (OUT / "raw" / "transactions.csv").open(newline="") as handle:
+        for row in csv.DictReader(handle):
+            digest = (row.get("hash") or "").lower()
+            signer = (row.get("signer") or "").lower()
+            if not digest or not signer:
+                continue
+            parents.append((digest, signer, row.get("nonce") or "", row.get("gas_used") or "", row.get("gas_price") or "", (row.get("method") or "").lower()))
+            raw = row.get("value")
+            amount = "" if raw in (None, "", "0", "0.0") else str(int(Decimal(raw)))
+            target = (row.get("to_address") or "").lower()
+            if target and amount:
+                eth.append((signer, target, digest, amount, norm_time(row["block_timestamp"]), row.get("block_number") or "", "", ""))
+            if len(parents) >= 5000:
+                con.executemany("INSERT OR REPLACE INTO tx VALUES (?,?,?,?,?,?)", parents)
+                con.executemany("INSERT INTO xfer VALUES (?,?,?,?,?,?,?,?)", eth)
+                parents, eth = [], []
+    con.executemany("INSERT OR REPLACE INTO tx VALUES (?,?,?,?,?,?)", parents)
+    con.executemany("INSERT INTO xfer VALUES (?,?,?,?,?,?,?,?)", eth)
+    con.commit()
+    log("loaded transactions")
+
+    con.execute("CREATE TEMP TABLE stage (source TEXT, target TEXT, hash TEXT, value TEXT, time TEXT, block_number TEXT, token_contract TEXT, transfer_index TEXT)")
+    for name in ("traces", "token_transfers"):
+        batch = []
+        with (OUT / "raw" / f"{name}.csv").open(newline="") as handle:
+            for row in csv.DictReader(handle):
+                source = (row.get("source") or "").lower()
+                target = (row.get("target") or "").lower()
+                digest = (row.get("hash") or "").lower()
+                raw = row.get("value")
+                amount = "" if raw in (None, "", "0", "0.0") else str(int(Decimal(raw)))
+                if not source or not target or not digest or not amount:
+                    continue
+                batch.append((source, target, digest, amount, norm_time(row["block_timestamp"]), row.get("block_number") or "", (row.get("token_contract") or "").lower(), row.get("transfer_index") or ""))
+                if len(batch) >= 5000:
+                    con.executemany("INSERT INTO stage VALUES (?,?,?,?,?,?,?,?)", batch)
+                    con.execute(
+                        """
+                        INSERT INTO xfer
+                        SELECT source, target, hash, value, time, block_number, token_contract, transfer_index
+                        FROM stage WHERE hash IN (SELECT hash FROM tx)
+                        """
+                    )
+                    con.execute("DELETE FROM stage")
+                    batch = []
+        if batch:
+            con.executemany("INSERT INTO stage VALUES (?,?,?,?,?,?,?,?)", batch)
+            con.execute(
+                """
+                INSERT INTO xfer
+                SELECT source, target, hash, value, time, block_number, token_contract, transfer_index
+                FROM stage WHERE hash IN (SELECT hash FROM tx)
+                """
+            )
+            con.execute("DELETE FROM stage")
+        con.commit()
+        log(f"loaded {name}")
+    con.execute("CREATE INDEX IF NOT EXISTS xfer_source ON xfer(source, time)")
+    con.commit()
+    con.execute("DELETE FROM busy")
+    con.execute(
+        """
+        INSERT INTO busy (address, n)
+        SELECT source, COUNT(*) FROM xfer
+        GROUP BY source
+        HAVING COUNT(*) > ?
+        """,
+        (max_transfers,),
+    )
+    con.commit()
+    log("walking")
     walk(con, hops)
     return con
 
 
-def self_test():
-    import tempfile
-
-    folder = Path(tempfile.mkdtemp())
-    con = connect(folder / "t.sqlite")
-    wei_one = str(10**18)
-    con.executemany("INSERT INTO tx VALUES (?,?,?,?,?,?)", [
-        ("0xaa", COLD, "1", "21000", "1", "0x"),
-        ("0xbb", SEED, "2", "21000", "1", "0xa9059cbb"),
-        ("0xcc", "0xb", "3", "21000", "1", "0x"),
-    ])
-    con.executemany("INSERT INTO xfer VALUES (?,?,?,?,?,?,?,?)", [
-        (COLD, "0xother", "0xaa", wei_one, "2025-02-21T15:00:00+00:00", "1", "", ""),
-        (COLD, SEED, "0xaa", wei_one, THEFT, "1", "", ""),
-        (SEED, "0xa", "0xbb", wei_one, "2025-02-21T10:00:00+00:00", "1", "", ""),
-        (SEED, "0xb", "0xbb", wei_one, "2025-02-21T16:00:00+00:00", "2", "", ""),
-        ("0xb", "0xc", "0xcc", "1000000", "2025-02-22T00:00:00+00:00", "3", "0xusdc", "4"),
-    ])
-    walk(con, 3)
-    got = {(row["source"], row["target"]) for row in con.execute("SELECT source, target FROM edge")}
-    if got != {(COLD, SEED), (SEED, "0xb"), ("0xb", "0xc")}:
-        raise SystemExit(f"bad edges {got}")
-    if con.execute("SELECT hop FROM reached WHERE address = '0xc'").fetchone()[0] != 2:
-        raise SystemExit("bad hop")
-    if human("1000000", 6) != "1" or human(wei_one, 18) != "1":
-        raise SystemExit("bad amount")
-    con.execute("INSERT INTO xfer VALUES (?,?,?,?,?,?,?,?)", ("0xb", "0xd", "0xcc", "1", "2025-02-22T01:00:00+00:00", "4", "", "1"))
-    con.execute("INSERT INTO xfer VALUES (?,?,?,?,?,?,?,?)", ("0xb", "0xe", "0xcc", "1", "2025-02-22T02:00:00+00:00", "5", "", "2"))
-    mark_busy(con, 2)
-    walk(con, 3)
-    got = {(row["source"], row["target"]) for row in con.execute("SELECT source, target FROM edge")}
-    if (SEED, "0xb") not in got or ("0xb", "0xc") in got:
-        raise SystemExit(f"busy address was expanded: {got}")
-    con.execute("CREATE UNIQUE INDEX IF NOT EXISTS edge_key ON edge(tx, source, target, token_contract, transfer_index)")
-    before = con.execute("SELECT COUNT(*) FROM edge").fetchone()[0]
-    con.executemany("INSERT INTO xfer VALUES (?,?,?,?,?,?,?,?)", [
-        ("0xf", "0xearly", "0xearly", wei_one, "2025-02-24T00:00:00+00:00", "8", "", "1"),
-        ("0xf", "0xg", "0xng", wei_one, "2025-02-25T01:00:00+00:00", "10", "", "1"),
-        ("0xf", "0xg", "0xng", wei_one, "2025-02-25T01:00:00+00:00", "10", "", "1"),
-        ("0xg", "0xh", "0xnh", wei_one, "2025-02-25T02:00:00+00:00", "11", "", "1"),
-    ])
-    done, nodes, edges = walk(con, 3, start=("0xf", "2025-02-25T00:00:00+00:00"))
-    got = {(row["source"], row["target"]) for row in con.execute("SELECT source, target FROM edge")}
-    if got != {(COLD, SEED), (SEED, "0xb"), ("0xf", "0xg"), ("0xg", "0xh")} or ("0xb", "0xc") in got:
-        raise SystemExit(f"noise walk failed {got}")
-    if done != 3 or nodes != 3 or edges != 2:
-        raise SystemExit(f"noise stats {done} {nodes} {edges}")
-    if con.execute("SELECT COUNT(*) FROM edge").fetchone()[0] != before + 2:
-        raise SystemExit("noise walk duplicated or dropped edges")
-    if walk(con, 3, start=("0xf", "2025-02-25T00:00:00+00:00")) != (0, 0, 0):
-        raise SystemExit("repeat noise walk changed the graph")
-    con.execute("INSERT INTO xfer VALUES (?,?,?,?,?,?,?,?)", ("0xbusy", "0xhz", "0xbh", "1", "2025-02-25T03:00:00+00:00", "12", "", "1"))
-    con.execute("INSERT INTO busy VALUES ('0xbusy', 3)")
-    walk(con, 3, start=("0xbusy", "2025-02-25T03:00:00+00:00"))
-    if con.execute("SELECT 1 FROM edge WHERE source = '0xbusy'").fetchone():
-        raise SystemExit("busy noise root was expanded")
-    if con.execute("SELECT 1 FROM reached WHERE address = '0xbusy'").fetchone() is None:
-        raise SystemExit("busy noise root missing")
-    kept = con.execute("SELECT COUNT(*) FROM edge").fetchone()[0]
-    con.executemany("INSERT INTO xfer VALUES (?,?,?,?,?,?,?,?)", [
-        ("0xcap", "0xa1", "0xca", "1", "2025-02-25T04:00:00+00:00", "13", "", "1"),
-        ("0xcap", "0xa2", "0xca", "1", "2025-02-25T04:00:00+00:00", "13", "", "2"),
-    ])
-    done, nodes, edges = walk(con, 3, start=("0xcap", "2025-02-25T04:00:00+00:00"), edge_limit=1)
-    if edges != 1 or con.execute("SELECT COUNT(*) FROM edge").fetchone()[0] != kept + 1:
-        raise SystemExit(f"edge cap failed {done} {nodes} {edges}")
-    print("self-test ok")
-
-
 def main():
     global LOG
-    parser = argparse.ArgumentParser(description="Download the theft graph from BigQuery into bigquery/out/")
+    parser = argparse.ArgumentParser(description="Download the theft graph from BigQuery into out/")
     parser.add_argument("--project", default="")
-    parser.add_argument("--budget-gib", type=float, default=900)
-    parser.add_argument("--hops", type=int, default=HOPS)
-    parser.add_argument("--max-transfers", type=int, default=50000, help="do not expand a wallet with more outgoing transfers than this")
+    parser.add_argument("--noise", action="store_true")
     parser.add_argument("--rebuild-graph", action="store_true")
-    parser.add_argument("--self-test", action="store_true")
-    parser.add_argument("--noise", action="store_true", help="add noise walks from local xfer and re-export; no BigQuery")
-    parser.add_argument("--noise-ratio", type=float, default=1.0, help="stop when new edges reach this multiple of the current edge count")
     args = parser.parse_args()
-    if args.self_test:
-        self_test()
-        return
-
-    if OUT.resolve() == (ROOT / "data").resolve():
-        raise SystemExit("refusing to write into data/")
     OUT.mkdir(parents=True, exist_ok=True)
     LOG = OUT / "download.log"
     if args.noise:
         db = OUT / "graph.sqlite"
         if not db.exists():
             raise SystemExit(f"missing {db}")
-        log(f"adding noise to {db}")
+        log("adding noise")
         con = connect(db)
-        if noise(con, args.hops, args.noise_ratio):
+        if noise(con, HOPS, 1.0):
             export(con)
-            log(f"saved {OUT / 'nodes.csv'} and {OUT / 'edges.csv'}")
+            log("saved")
         return
-    project = project_id(args.project)
-    if not project:
-        raise SystemExit("python3 bigquery/download_graph.py --project YOUR_PROJECT_ID")
+    if not args.project:
+        raise SystemExit("python3 download_graph.py --project YOUR_PROJECT_ID")
     try:
         from google.cloud import bigquery
         from google.auth.exceptions import DefaultCredentialsError
     except ImportError:
         raise SystemExit("pip install google-cloud-bigquery")
     try:
-        client = bigquery.Client(project=project, location="US")
+        client = bigquery.Client(project=args.project, location="US")
     except DefaultCredentialsError:
         raise SystemExit("gcloud auth application-default login")
 
-    budget = int(args.budget_gib * 1024**3)
     state = load_state()
-    log(f"writing to {OUT}; cap {gib(budget)}")
+    log(f"writing to {OUT}")
     for name, sql in queries().items():
-        download_table(client, name, sql, budget, state)
-    con = build(args.hops, args.rebuild_graph, args.max_transfers)
-    enrich(client, con, budget, state)
-    earlier(client, con, budget, state)
+        download_table(client, name, sql, BUDGET, state)
+    con = build(HOPS, args.rebuild_graph, 50000)
+    enrich(client, con, BUDGET, state)
+    earlier(client, con, BUDGET, state)
     export(con)
-    log(f"done, {gib(state['spent'])} scanned by this tool")
+    log("done")
 
 
 if __name__ == "__main__":

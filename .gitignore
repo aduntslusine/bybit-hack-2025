@@ -1,10 +1,14 @@
 .venv/
 venv/
 __pycache__/
+.DS_Store
+.env
+
+out/
+data/
 *.csv
-*.txt
 *.log
 *.sqlite
 *.json
-.env
-bigquery/out/
+*.txt
+analysis.ipynb
