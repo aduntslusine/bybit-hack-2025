@@ -25,6 +25,8 @@ Each wallet also records whether it had a transfer in the 90 days before 21 Febr
 
 `to_dump.py` loads the export into Neo4j. Addresses are nodes. A transfer is a relationship between two addresses.
 
+We also provide a .dump file that's a snapshot of an existing Neo4j DB containing the data, hosted at the public S3 bucket: `s3://gds-public-dataset/bybit-hack-graph.dump`. You can use Neo4j's load functionality to load this .dump into your DB.
+
 ![Neo4j database information](bybit-database.png)
 
 ## Run
