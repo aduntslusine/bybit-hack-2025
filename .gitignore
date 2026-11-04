@@ -6,9 +6,11 @@ __pycache__/
 
 out/
 data/
+pngs/
 *.csv
 *.log
 *.sqlite
 *.json
 *.txt
 analysis.ipynb
+start_bybit.sh

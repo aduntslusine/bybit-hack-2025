@@ -9,10 +9,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "out"
 CACHE = Path.home() / "Library/Application Support/neo4j-desktop/Application/Cache"
-DROP = {"hop", "first_received_time", "graph_in_count", "graph_out_count"}
+DROP = {"hop", "first_received_time", "graph_in_count", "graph_out_count", "is_contract"}
 HEADERS = {
-    "nodes.csv": "address:ID(Address),is_contract,active_before:boolean,tx_count_before:int,last_seen_before",
-    "edges.csv": ":START_ID(Address),:END_ID(Address),tx,asset,amount,time,block_number,nonce,gas_used,gas_price,method,token_contract,signer,transfer_index",
+    "nodes.csv": "address:ID(Address),active_before:boolean,tx_count_before:int,last_seen_before",
+    "edges.csv": ":START_ID(Address),:END_ID(Address),tx,asset,amount:double,time:datetime,block_number,nonce,gas_used,gas_price,method,token_contract,signer,transfer_index",
 }
 
 

@@ -4,15 +4,45 @@ Public Ethereum transfers around the Bybit cold-wallet theft on 21 February 2025
 
 The download is public chain data from `bigquery-public-data.goog_blockchain_ethereum_mainnet_us`.
 
-## Graph
+## How the graph is constructed
 
-The window is 21 February 2025 through 7 March 2025. The walk starts at the cold wallet and the receiver and follows outgoing transfers for 10 hops. A wallet is expanded only after it has received traced funds, and only transfers at or after that time are kept. Outgoing transfers from the cold wallet are kept when the target is the receiver and the time is at or after the theft, 2025-02-21 14:13:35 UTC.
+### 1. Download
 
-A wallet with more than 50,000 outgoing transfers in the window is not expanded. The transfer into that wallet stays in the graph.
+Direct ETH transfers, internal ETH transfers from contract calls, and ERC-20 token transfers are pulled from `bigquery-public-data.goog_blockchain_ethereum_mainnet_us` for the window **21 Feb – 7 Mar 2025** and written to `out/raw/`.
 
-`--noise` adds separate walks from the local database. Seeds are transfers of at least 100 ETH, stETH, mETH, cmETH, or WETH to a wallet that was not already reached.
+### 2. Local graph walk (BFS)
 
-Each wallet also records whether it had a transfer in the 90 days before 21 February.
+The raw transfers are loaded into a local SQLite database (`out/graph.sqlite`). A breadth-first walk then traces funds forward from two starting points:
+
+- **Cold wallet** `0x1db92e2eebc8e0c075a02bea49a2935bcd2dfcf4` — starting at the moment of the theft, `2025-02-21 14:13:35 UTC`
+- **First receiver** `0x47666fab8bd0ac7003bce3f5c3585383f09486e2` — starting at the time it first received funds from the cold wallet
+
+At each hop, a wallet is expanded only once, and only transfers **at or after the time it first received traced funds** are followed. This prevents backwards contamination from pre-existing activity. The walk goes up to **10 hops**.
+
+A wallet with more than **50,000 outgoing transfers** in the window is treated as a high-volume router (e.g. a DEX or bridge contract) and is not expanded — the inbound transfer is kept, but its outgoing edges are not followed.
+
+### 3. Enrichment
+
+After the walk, two more BigQuery lookups add context to each node:
+
+- **Contract flag** — whether each address is a smart contract or an EOA
+- **Token metadata** — symbol, name, and decimals for each ERC-20 seen in the edges (used to convert raw integer amounts to human-readable values)
+
+A third lookup scans the **90 days before the theft** (Nov 2024 – Feb 2025) for each reached address and records whether it was active and how many transactions it sent/received. This `active_before` flag helps distinguish purpose-built laundering wallets (freshly created) from compromised or reused ones.
+
+### 4. Noise (optional)
+
+`--noise` adds subgraphs from wallets unrelated to the theft, making the graph more representative of normal on-chain activity. Seeds are transfers of at least **100 ETH / stETH / mETH / cmETH / WETH** into wallets that were not already reached by the theft walk. The addresses introduced by noise are written to `out/grader_noise.csv`.
+
+### 5. Export
+
+The final SQLite graph is exported to three CSVs in `out/`:
+
+| File | Contents |
+|---|---|
+| `nodes.csv` | One row per address: hop distance, contract flag, prior-activity stats |
+| `edges.csv` | One row per transfer: amount (decimal-scaled), asset symbol, timestamp, gas info |
+| `tokens.csv` | Symbol, name, decimals for every ERC-20 in the graph |
 
 ## Files
 
