@@ -32,8 +32,8 @@ At each hop, a wallet is expanded only once, and only transfers at or after the 
 Addresses are nodes. A transfer is a relationship between two addresses.
 
 <table><tr>
-<td><img src="assets/schema.png" width="340"/></td>
-<td><img src="assets/graph.png" width="560"/></td>
+<td><img src="images/schema.png" width="340"/></td>
+<td><img src="images/graph.png" width="560"/></td>
 </tr></table>
 
 A pre-built dump is hosted at `s3://gds-public-dataset/bybit-hack-graph.dump`. Load it with:
