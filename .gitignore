@@ -14,3 +14,4 @@ pngs/
 *.txt
 analysis.ipynb
 start_bybit.sh
+to_dump.py
