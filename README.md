@@ -1,6 +1,6 @@
 # Bybit theft graph
 
-Public Ethereum transfers around the Bybit cold-wallet theft on 21 February 2025. The cold wallet `0x1db92e2eebc8e0c075a02bea49a2935bcd2dfcf4` was drained to `0x47666fab8bd0ac7003bce3f5c3585383f09486e2`. This repo downloads that window from BigQuery and follows the funds forward.
+Public Ethereum transfers around the Bybit cold-wallet theft on 21 February 2025. The cold wallet `0x1db92e2eebc8e0c075a02bea49a2935bcd2dfcf4` was drained to a single immediate receiver `0x47666fab8bd0ac7003bce3f5c3585383f09486e2`, from which funds were dispersed across a network of intermediate wallets. The FBI later published a list of 51 destination wallets identified as part of the laundering operation. The graph also contains wallets from unrelated ETH transfers in the same time window — addresses with no connection to the theft — added to make the benchmark dataset more realistic. These are referred to as noise.
 
 The download is public chain data from `bigquery-public-data.goog_blockchain_ethereum_mainnet_us`.
 
@@ -8,7 +8,7 @@ The download is public chain data from `bigquery-public-data.goog_blockchain_eth
 
 **1. Download:** Direct ETH transfers, internal ETH transfers from contract calls, and ERC-20 token transfers are pulled from `bigquery-public-data.goog_blockchain_ethereum_mainnet_us` for the window **21 Feb – 7 Mar 2025** and written to `out/raw/`.
 
-**2. Local graph walk:** The raw transfers are loaded into a local SQLite database (`out/graph.sqlite`). A breadth-first walk then traces funds forward from two starting points:
+**2. Local graph walk:** A breadth-first walk traces funds forward from two starting points:
 
 - **Cold wallet** `0x1db92e2eebc8e0c075a02bea49a2935bcd2dfcf4` — starting at the moment of the theft, `2025-02-21 14:13:35 UTC`
 - **First receiver** `0x47666fab8bd0ac7003bce3f5c3585383f09486e2` — starting at the time it first received funds from the cold wallet
@@ -19,7 +19,7 @@ At each hop, a wallet is expanded only once, and only transfers at or after the 
 
 **4. Noise (optional):** `--noise` samples a small set of unrelated ETH transfers from the same window and adds them to the graph. The addresses introduced are written to `out/noise_nodes.csv`.
 
-**5. Export:** The final SQLite graph is exported to three CSVs in `out/`:
+**5. Export:** The graph is exported to three CSVs in `out/`:
 
 | File | Contents |
 |---|---|
@@ -51,4 +51,4 @@ python3 download_graph.py --project YOUR_PROJECT_ID
 python3 download_graph.py --project YOUR_PROJECT_ID --noise
 ```
 
-`--project` is the Google Cloud project that runs the query. The script stops before a query would pass a 900 GiB cap. A later run skips tables already saved under `out/raw/` and keeps the graph when `out/graph.sqlite` and `out/edges.csv` already exist. `--rebuild-graph` loads the raw files again and walks from the cold wallet. `out/` is generated and not committed.
+`--project` is the Google Cloud project ID. `out/` is generated and not committed.
